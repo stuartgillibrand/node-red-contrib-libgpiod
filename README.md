@@ -16,6 +16,36 @@ cd ~/.node-red
 npm install node-red-contrib-libgpiod
 ```
 
+### Local development install
+
+If you want to use this package in a local Node-RED instance without publishing it to npm, install it from the local checkout.
+
+Direct install from the repository path:
+
+```
+cd ~/.node-red
+npm install /path/to/node-red-contrib-libgpiod
+```
+
+For active development, use `npm link` so you can update the node code in-place:
+
+```
+cd /path/to/node-red-contrib-libgpiod
+npm install
+npm link
+
+cd ~/.node-red
+npm link node-red-contrib-libgpiod
+```
+
+Restart Node-RED after installing or updating the package.
+
+Notes:
+
+- run the install on the same machine and architecture that runs Node-RED because `node-libgpiod` is a native dependency
+- if your Node-RED `userDir` is not `~/.node-red`, run the install there instead
+- `gpio-watch` also requires `gpiomon` from libgpiod tools to be available on `PATH`
+
 ### Usage
 
 in nodes configuration choose device and correct pin number  
