@@ -26,7 +26,8 @@
     "version": ">=2.0.0",
     "nodes": {
       "gpio-in": "nodes/gpio-in.js",
-      "gpio-out": "nodes/gpio-out.js"
+      "gpio-out": "nodes/gpio-out.js",
+      "gpio-watch": "nodes/gpio-watch.js"
     }
   }
 }
