@@ -1,5 +1,6 @@
 const { spawn } = require('child_process')
 const readline = require('readline')
+const nativeWatch = require('../lib/gpio-watch-native')
 
 const WATCH_FORMAT = '%e %s %n'
 
@@ -9,6 +10,9 @@ const BIAS_ARGUMENTS = {
   pulldown: 'pull-down',
   floating: 'disable',
 }
+
+const NATIVE_EDGE_RISING = 1
+const NS_PER_SECOND = 1000000000n
 
 module.exports = function (RED) {
   function setError(node, msg) {
@@ -47,6 +51,52 @@ module.exports = function (RED) {
     }
   }
 
+  function parseTimestampNs(value) {
+    if (typeof value === 'bigint') {
+      return value
+    }
+
+    if (typeof value === 'string' && /^\d+$/.test(value)) {
+      return BigInt(value)
+    }
+
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+      return BigInt(value)
+    }
+
+    return null
+  }
+
+  function parseNativeEvent(event) {
+    if (!event || typeof event.eventType !== 'number') {
+      return null
+    }
+
+    const timestampNs = parseTimestampNs(event.timestampNs)
+
+    if (timestampNs === null || (event.eventType !== 0 && event.eventType !== NATIVE_EDGE_RISING)) {
+      return null
+    }
+
+    const seconds = Number(timestampNs / NS_PER_SECOND)
+    const nanoseconds = Number(timestampNs % NS_PER_SECOND)
+    const isRising = event.eventType === NATIVE_EDGE_RISING
+
+    if (!Number.isSafeInteger(seconds) || !Number.isSafeInteger(nanoseconds)) {
+      return null
+    }
+
+    return {
+      edge: isRising ? 'rising' : 'falling',
+      payload: isRising ? 1 : 0,
+      timestamp: {
+        seconds,
+        nanoseconds,
+      },
+      timestampMs: seconds * 1000 + nanoseconds / 1e6,
+    }
+  }
+
   function buildWatchArgs(node) {
     const args = ['-b', '-F', WATCH_FORMAT, '-B', BIAS_ARGUMENTS[node.bias] || BIAS_ARGUMENTS.asis]
 
@@ -61,7 +111,7 @@ module.exports = function (RED) {
     return args
   }
 
-  function teardownWatch(node) {
+  function teardownProcessWatch(node) {
     if (node.watchReader) {
       node.watchReader.removeAllListeners()
       node.watchReader.close()
@@ -79,6 +129,23 @@ module.exports = function (RED) {
 
       node.watchProcess.removeAllListeners()
       node.watchProcess = null
+    }
+  }
+
+  function teardownNativeWatch(node) {
+    if (!node.nativeWatcher) {
+      return
+    }
+
+    const watcher = node.nativeWatcher
+    node.nativeWatcher = null
+
+    try {
+      watcher.close()
+    } catch (error) {
+      if (!node.closing) {
+        setError(node, `Unable to stop native watch: ${error.message}`)
+      }
     }
   }
 
@@ -105,7 +172,7 @@ module.exports = function (RED) {
     })
   }
 
-  function startWatch(node) {
+  function startProcessWatch(node) {
     const args = buildWatchArgs(node)
     const child = spawn('gpiomon', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -144,12 +211,12 @@ module.exports = function (RED) {
         return
       }
 
-      teardownWatch(node)
+      teardownProcessWatch(node)
       setError(node, `Unable to start gpiomon: ${error.message}`)
     })
 
     child.on('close', function (code, signal) {
-      teardownWatch(node)
+      teardownProcessWatch(node)
 
       if (node.closing) {
         return
@@ -171,10 +238,62 @@ module.exports = function (RED) {
     })
   }
 
+  function startNativeWatch(node) {
+    node.nativeWatcher = nativeWatch.createWatcher(
+      {
+        device: node.device,
+        pin: node.pin,
+        edge: node.edge,
+        bias: node.bias,
+        consumer: node.name || `gpio-watch-${node.pin}`,
+      },
+      function (event) {
+        if (node.closing) {
+          return
+        }
+
+        const watchEvent = parseNativeEvent(event)
+
+        if (!watchEvent) {
+          return
+        }
+
+        emitWatchEvent(node, watchEvent)
+      },
+      function (error) {
+        if (node.closing) {
+          return
+        }
+
+        const message = error && error.message ? error.message : String(error)
+        teardownNativeWatch(node)
+        setError(node, `Native watch failed: ${message}`)
+      }
+    )
+
+    setWatchingStatus(node)
+  }
+
+  function startWatch(node) {
+    if (nativeWatch.isAvailable) {
+      try {
+        startNativeWatch(node)
+        return
+      } catch (error) {
+        setError(node, error.message)
+        return
+      }
+    }
+
+    startProcessWatch(node)
+  }
+
   function stopWatch(node, done) {
     const child = node.watchProcess
 
     node.closing = true
+
+    teardownNativeWatch(node)
 
     if (!child) {
       done()
@@ -189,7 +308,7 @@ module.exports = function (RED) {
       }
 
       finished = true
-      teardownWatch(node)
+      teardownProcessWatch(node)
       done()
     }
 
@@ -226,6 +345,7 @@ module.exports = function (RED) {
     node.edge = config.edge || 'both'
     node.debounce = Number(config.debounce)
     node.lastEventTimestampMs = null
+    node.nativeWatcher = null
     node.watchProcess = null
     node.watchReader = null
     node.watchStderr = ''
